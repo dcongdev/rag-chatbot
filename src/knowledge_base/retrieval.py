@@ -1,0 +1,1 @@
+"""Placeholder for knowledge retrieval."""
