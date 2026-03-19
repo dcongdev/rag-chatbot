@@ -1,4 +1,4 @@
-"""Persistent chunk indexing; no query retrieval is implemented here."""
+"""Persistent chunk indexing and vector queries through a shared local client."""
 
 import hashlib
 import json
@@ -9,6 +9,7 @@ from pathlib import Path
 
 import chromadb
 from chromadb.config import Settings
+from chromadb.api.types import QueryResult
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
@@ -109,10 +110,8 @@ class ChromaStore:
             pending = [identifier for identifier in batch if identifier not in existing]
             if not pending:
                 continue
-            if self._embeddings is None:
-                self._embeddings = create_embeddings()
             documents = [unique[identifier] for identifier in pending]
-            vectors = self._embeddings.embed_documents(
+            vectors = self._get_embeddings().embed_documents(
                 [document.page_content for document in documents]
             )
             self._collection.upsert(
@@ -123,6 +122,36 @@ class ChromaStore:
             )
             added.extend(pending)
         return added
+
+    def _get_embeddings(self) -> Embeddings:
+        if self._embeddings is None:
+            self._embeddings = create_embeddings()
+        return self._embeddings
+
+    def query_chunks(self, query: str, *, top_k: int) -> QueryResult | None:
+        """Query stored vectors; return None for blank input or an empty collection.
+
+        The same lazy embeddings instance serves indexing and query embedding.
+        Invalid parameters raise ValueError; a closed client raises RuntimeError.
+        """
+        if self._closed:
+            raise RuntimeError("The storage client is closed.")
+        if not isinstance(query, str):
+            raise ValueError("query must be a string.")
+        if type(top_k) is not int or top_k <= 0:
+            raise ValueError("top_k must be a positive integer.")
+        query = query.strip()
+        if not query:
+            return None
+        count = self._collection.count()
+        if count == 0:
+            return None
+        vector = self._get_embeddings().embed_query(query)
+        return self._collection.query(
+            query_embeddings=[vector],
+            n_results=min(top_k, count),
+            include=["documents", "metadatas", "distances"],
+        )
 
     def close(self) -> None:
         """Release the persistent client without deleting indexed data."""
