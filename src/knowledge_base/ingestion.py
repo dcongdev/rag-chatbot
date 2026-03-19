@@ -2,10 +2,14 @@
 
 from collections.abc import Iterable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pypdf import PdfReader
+
+if TYPE_CHECKING:
+    from knowledge_base.storage import ChromaStore
 
 
 class IngestionError(ValueError):
@@ -106,4 +110,17 @@ def ingest_document(
     """Load a supported file and return metadata-preserving text chunks."""
     return split_documents(
         load_document(path), chunk_size=chunk_size, chunk_overlap=chunk_overlap
+    )
+
+
+def index_document(
+    path: str | Path,
+    store: "ChromaStore",
+    *,
+    chunk_size: int = 1000,
+    chunk_overlap: int = 200,
+) -> list[str]:
+    """Parse, chunk, and persist a document; return newly indexed chunk IDs."""
+    return store.index_chunks(
+        ingest_document(path, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     )
