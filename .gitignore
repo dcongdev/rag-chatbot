@@ -22,3 +22,7 @@ dist/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local documents and vector storage (ignore custom paths separately)
+/data/
+/uploads/
