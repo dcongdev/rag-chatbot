@@ -1,0 +1,3 @@
+[server]
+# Avoid probing Transformers' lazy vision modules during source-file discovery.
+fileWatcherType = "none"
