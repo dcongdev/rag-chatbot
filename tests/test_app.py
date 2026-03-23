@@ -9,6 +9,10 @@ import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 from knowledge_base.retrieval import RetrievedChunk
+from knowledge_base.generation import (
+    INSUFFICIENT_CONTEXT, GenerationError, MissingAPIKeyError, QuestionAnswer,
+    SourceReference,
+)
 from knowledge_base.storage import ChromaStore
 from knowledge_base.uploads import index_upload
 from tests.test_ingestion import write_pdf
@@ -51,7 +55,7 @@ class AppTests(unittest.TestCase):
     def search(self, text="Tell me about cats", top_k=4):
         self.app.text_input(key="query").set_value(text)
         self.app.number_input(key="top_k").set_value(top_k)
-        self.app.button[-1].click().run()
+        self.app.button(key="search_submit").click().run()
 
     def test_initial_page_is_lazy_and_requires_files(self):
         self.assertFalse(self.app.exception)
@@ -140,6 +144,60 @@ class AppTests(unittest.TestCase):
         self.assertIn("Plain content", [item.value for item in self.app.text])
         self.assertFalse(any("PDF page:" in item.value or "Similarity score:" in item.value
                              for item in self.app.caption))
+
+    def ask(self, question="What do the documents say?"):
+        self.app.text_input(key="question").set_value(question)
+        self.app.button(key="ask_submit").click().run()
+
+    def test_question_answer_and_sources_persist_on_rerun(self):
+        answer = QuestionAnswer("Cats are mammals. [1]", [
+            SourceReference(1, "chunk", "animals.pdf", 2),
+        ], True)
+        with patch("knowledge_base.generation.answer_question", return_value=answer) as generate:
+            self.app.number_input(key="answer_top_k").set_value(2)
+            self.ask()
+            self.assertFalse(self.app.exception)
+            self.assertEqual(generate.call_args.kwargs["top_k"], 2)
+            self.assertIn("Cats are mammals. [1]", [item.value for item in self.app.markdown])
+            self.assertIn("[1] animals.pdf — PDF page 2", [item.value for item in self.app.text])
+            self.app.run()
+            generate.assert_called_once()
+            self.assertIn("Cats are mammals. [1]", [item.value for item in self.app.markdown])
+        self.upload_txt()
+        self.assertNotIn("question_answer", self.app.session_state)
+
+    def test_blank_question_does_not_open_store_or_generate(self):
+        with patch("knowledge_base.generation.answer_question") as generate:
+            self.ask("  ")
+            generate.assert_not_called()
+        self.factory.assert_not_called()
+        self.assertEqual(self.app.warning[0].value, "Enter a question.")
+
+    def test_question_missing_credentials_and_timeout(self):
+        for error in [MissingAPIKeyError("Set GEMINI_API_KEY"), GenerationError("Gemini timed out")]:
+            with self.subTest(error=str(error)):
+                with patch("knowledge_base.generation.answer_question", side_effect=error):
+                    self.ask()
+                self.assertFalse(self.app.exception)
+                self.assertIn(str(error), self.app.error[0].value)
+                self.assertNotIn("question_answer", self.app.session_state)
+
+    def test_insufficient_context_displays_information(self):
+        with patch("knowledge_base.generation.answer_question", return_value=
+                   QuestionAnswer(INSUFFICIENT_CONTEXT, [], False)):
+            self.ask()
+        self.assertFalse(self.app.exception)
+        self.assertIn(INSUFFICIENT_CONTEXT, [item.value for item in self.app.info])
+
+    def test_failed_question_clears_old_answer_and_hides_internal_error(self):
+        with patch("knowledge_base.generation.answer_question", return_value=
+                   QuestionAnswer("Previous answer", [], True)):
+            self.ask()
+        with patch("knowledge_base.generation.answer_question", side_effect=RuntimeError("secret-key")):
+            self.ask("Another question")
+        self.assertFalse(self.app.exception)
+        self.assertNotIn("question_answer", self.app.session_state)
+        self.assertNotIn("secret-key", self.app.error[0].value)
 
 
 class UploadTests(unittest.TestCase):
