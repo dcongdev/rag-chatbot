@@ -124,3 +124,26 @@ def index_document(
     return store.index_chunks(
         ingest_document(path, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     )
+
+
+def replace_document(
+    filename: str,
+    path: str | Path,
+    store: "ChromaStore",
+    *,
+    chunk_size: int = 1000,
+    chunk_overlap: int = 200,
+    batch_size: int = 128,
+) -> list[str]:
+    """Reprocess a file and replace the exact indexed filename, without renaming it.
+
+    The replacement path may have a different basename. Source metadata retains
+    the selected document identity; PDF page metadata comes from the new file.
+    Parsing failures leave storage unchanged; empty replacements are rejected.
+    """
+    chunks = ingest_document(path, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    documents = [
+        Document(page_content=chunk.page_content, metadata={**chunk.metadata, "source": filename})
+        for chunk in chunks
+    ]
+    return store.replace_chunks(filename, documents, batch_size=batch_size)
