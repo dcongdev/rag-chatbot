@@ -14,6 +14,7 @@ from knowledge_base.generation import (
     SourceReference,
 )
 from knowledge_base.storage import ChromaStore
+from langchain_core.documents import Document
 from knowledge_base.uploads import index_upload
 from tests.test_ingestion import write_pdf
 from tests.test_retrieval import DeterministicEmbeddings
@@ -57,12 +58,14 @@ class AppTests(unittest.TestCase):
         self.app.number_input(key="top_k").set_value(top_k)
         self.app.button(key="search_submit").click().run()
 
-    def test_initial_page_is_lazy_and_requires_files(self):
+    def test_initial_page_lists_storage_without_loading_embeddings(self):
         self.assertFalse(self.app.exception)
         self.assertTrue(self.app.button(key="index").disabled)
         self.assertTrue(self.app.file_uploader[0].accept_multiple_files)
         self.assertEqual(self.app.number_input(key="top_k").value, 4)
-        self.factory.assert_not_called()
+        self.factory.assert_called_once_with()
+        self.assertEqual(self.embeddings.document_calls, [])
+        self.assertEqual(self.embeddings.query_calls, [])
 
     def test_multiple_uploads_search_and_duplicate_handling(self):
         self.upload_txt()
@@ -112,15 +115,16 @@ class AppTests(unittest.TestCase):
         self.search(" \n ")
         self.assertFalse(self.app.exception)
         self.assertEqual(self.app.warning[0].value, "Enter a search query.")
-        self.factory.assert_not_called()
+        self.factory.assert_called_once_with()
 
     def test_search_empty_collection(self):
         self.search()
         self.assertFalse(self.app.exception)
-        self.assertIn("No matching chunks", self.app.info[0].value)
+        self.assertTrue(any("No matching chunks" in item.value for item in self.app.info))
         self.assertEqual(self.embeddings.query_calls, [])
 
     def test_database_open_failure(self):
+        st.cache_resource.clear()
         self.factory.side_effect = RuntimeError("Database unavailable")
         self.search()
         self.assertFalse(self.app.exception)
@@ -170,7 +174,7 @@ class AppTests(unittest.TestCase):
         with patch("knowledge_base.generation.answer_question") as generate:
             self.ask("  ")
             generate.assert_not_called()
-        self.factory.assert_not_called()
+        self.factory.assert_called_once_with()
         self.assertEqual(self.app.warning[0].value, "Enter a question.")
 
     def test_question_missing_credentials_and_timeout(self):
@@ -198,6 +202,120 @@ class AppTests(unittest.TestCase):
         self.assertFalse(self.app.exception)
         self.assertNotIn("question_answer", self.app.session_state)
         self.assertNotIn("secret-key", self.app.error[0].value)
+
+    def test_management_list_refreshes_after_upload(self):
+        self.upload_txt()
+        self.assertFalse(self.app.exception)
+        self.assertEqual(self.app.dataframe[0].value.to_dict("records"), [
+            {"Filename": "cats.txt", "Chunks": 1}, {"Filename": "fish.txt", "Chunks": 1},
+        ])
+        self.assertTrue(self.app.button(key="replace").disabled)
+
+    def test_add_existing_filename_requires_explicit_replacement(self):
+        self.upload_txt()
+        self.app.file_uploader(key="uploads").set_value(
+            ("cats.txt", b"Kittens drink milk", "text/plain")
+        ).run()
+        self.app.button(key="index").click().run()
+        self.assertTrue(any("Use Replace document" in item.value for item in self.app.info))
+        records = self.stores[0]._collection.get(where={"source": "cats.txt"})
+        self.assertEqual(records["documents"], ["Cats are mammals"])
+
+    def test_delete_requires_confirmation_and_removes_retrieval_results(self):
+        self.upload_txt()
+        self.search()
+        self.app.session_state["question_answer"] = QuestionAnswer("Old answer", [], True)
+        self.app.session_state["answered_question"] = "Old question"
+        self.app.button(key="request_delete").click().run()
+        self.assertEqual(self.stores[0]._collection.count(), 2)
+        self.assertIn("cats.txt", self.app.warning[0].value)
+        self.app.button(key="confirm_delete").click().run()
+        self.assertFalse(self.app.exception)
+        self.assertEqual(self.app.dataframe[0].value.to_dict("records"), [
+            {"Filename": "fish.txt", "Chunks": 1},
+        ])
+        self.assertTrue(any("Deleted cats.txt" in item.value for item in self.app.success))
+        self.assertNotIn("search_results", self.app.session_state)
+        self.assertNotIn("question_answer", self.app.session_state)
+        self.search(top_k=20)
+        self.assertNotIn("Source: cats.txt", [item.value for item in self.app.text])
+        self.assertIn("Source: fish.txt", [item.value for item in self.app.text])
+        self.app.button(key="request_delete").click().run()
+        self.app.button(key="confirm_delete").click().run()
+        self.assertFalse(self.app.exception)
+        self.assertEqual(len(self.app.dataframe), 0)
+        self.assertTrue(any("No indexed documents" in item.value for item in self.app.info))
+
+    def test_delete_cancel_and_selection_change_reset_confirmation(self):
+        self.upload_txt()
+        self.app.button(key="request_delete").click().run()
+        self.app.button(key="cancel_delete").click().run()
+        self.assertNotIn("pending_delete", self.app.session_state)
+        self.assertEqual(self.stores[0]._collection.count(), 2)
+        self.app.button(key="request_delete").click().run()
+        self.app.selectbox(key="managed_document").set_value("fish.txt").run()
+        self.assertNotIn("pending_delete", self.app.session_state)
+        self.assertEqual(self.stores[0]._collection.count(), 2)
+
+    def test_replace_pdf_removes_stale_chunks_and_updates_search(self):
+        self.upload_txt()
+        self.stores[0].index_chunks([
+            Document(page_content="Dogs enjoy walks", metadata={"source": "cats.txt"}),
+        ])
+        self.app.run()
+        old_ids = self.stores[0]._collection.get(where={"source": "cats.txt"})["ids"]
+        self.search()
+        pdf = self.root / "replacement.pdf"
+        write_pdf(pdf, ["", "Kittens drink milk"])
+        self.app.file_uploader(key="replacement:cats.txt").set_value(
+            ("replacement.pdf", pdf.read_bytes(), "application/pdf")
+        ).run()
+        self.app.button(key="replace").click().run()
+        self.assertFalse(self.app.exception)
+        self.assertTrue(any("Replaced cats.txt: 1 chunks" in item.value for item in self.app.success))
+        self.assertEqual(self.app.dataframe[0].value.to_dict("records")[0],
+                         {"Filename": "cats.txt", "Chunks": 1})
+        records = self.stores[0]._collection.get(where={"source": "cats.txt"})
+        self.assertTrue(set(old_ids).isdisjoint(records["ids"]))
+        self.assertEqual(records["metadatas"], [{"source": "cats.txt", "page": 2}])
+        self.assertNotIn("search_results", self.app.session_state)
+        self.search(top_k=20)
+        texts = [item.value for item in self.app.text]
+        self.assertIn("Kittens drink milk", texts)
+        self.assertNotIn("Cats are mammals", texts)
+        self.assertNotIn("Dogs enjoy walks", texts)
+        self.assertIn("PDF page: 2", [item.value for item in self.app.caption])
+
+    def test_failed_replacement_preserves_document_and_shows_error(self):
+        self.upload_txt()
+        before = self.stores[0]._collection.get()
+        for content in [b"\xff", b""]:
+            with self.subTest(content=content):
+                self.app.file_uploader(key="replacement:cats.txt").set_value(
+                    ("invalid.txt", content, "text/plain")
+                ).run()
+                self.app.button(key="replace").click().run()
+                self.assertFalse(self.app.exception)
+                self.assertTrue(any("Could not replace cats.txt" in item.value for item in self.app.error))
+                self.assertEqual(self.stores[0]._collection.get(), before)
+                self.assertEqual(len(self.app.dataframe[0].value), 2)
+
+    def test_delete_failure_keeps_document_and_shows_error(self):
+        self.upload_txt()
+        self.app.button(key="request_delete").click().run()
+        with patch.object(self.stores[0], "delete_document", side_effect=RuntimeError("database unavailable")):
+            self.app.button(key="confirm_delete").click().run()
+        self.assertFalse(self.app.exception)
+        self.assertTrue(any("Could not delete cats.txt" in item.value for item in self.app.error))
+        self.assertEqual(self.stores[0]._collection.count(), 2)
+
+    def test_listing_failure_does_not_remove_search_or_question_forms(self):
+        with patch.object(self.stores[0], "list_documents", side_effect=RuntimeError("database unavailable")):
+            self.app.run()
+        self.assertFalse(self.app.exception)
+        self.assertTrue(any("Could not list indexed documents" in item.value for item in self.app.error))
+        self.assertEqual(self.app.text_input(key="query").label, "Search query")
+        self.assertEqual(self.app.text_input(key="question").label, "Question")
 
 
 class UploadTests(unittest.TestCase):
