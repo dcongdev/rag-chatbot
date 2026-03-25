@@ -1,4 +1,4 @@
-"""Minimal local document indexing and semantic search interface."""
+"""Session-only document chat and Knowledge Base management interface."""
 
 import streamlit as st
 from pathlib import PurePosixPath
@@ -18,6 +18,11 @@ def get_store() -> ChromaStore:
 def clear_results() -> None:
     for key in ("search_results", "searched_query", "question_answer", "answered_question"):
         st.session_state.pop(key, None)
+    st.session_state["chat_messages"] = []
+
+
+def clear_chat() -> None:
+    st.session_state["chat_messages"] = []
 
 
 def clear_delete_confirmation() -> None:
@@ -81,12 +86,8 @@ def manage_documents() -> None:
             st.rerun()
 
 
-def main() -> None:
-    st.set_page_config(page_title="AI Knowledge Base Assistant")
-    st.title("AI Knowledge Base Assistant")
-    st.write("Upload documents, then search their contents for relevant passages.")
-
-    st.subheader("Knowledge Base")
+def knowledge_base_tab() -> None:
+    st.caption("Add and manage PDF/TXT documents. Changes clear displayed chat and search results.")
     uploads = st.file_uploader(
         "PDF and TXT files", type=["pdf", "txt"], accept_multiple_files=True,
         key="uploads",
@@ -127,7 +128,8 @@ def main() -> None:
 
     manage_documents()
 
-    st.subheader("Search documents")
+
+def semantic_search() -> None:
     with st.form("search"):
         query = st.text_input("Search query", key="query")
         top_k = st.number_input(
@@ -159,7 +161,8 @@ def main() -> None:
             st.text(f"Results for: {st.session_state['searched_query']}")
             st.caption("Higher similarity scores indicate closer matches, not answer confidence.")
             for position, chunk in enumerate(results, start=1):
-                with st.expander(f"Chunk {position}", expanded=True):
+                with st.container(border=True):
+                    st.caption(f"Chunk {position}")
                     st.text(f"Source: {chunk.metadata.get('source', 'Unknown')}")
                     if chunk.metadata.get("page") is not None:
                         st.caption(f"PDF page: {chunk.metadata['page']}")
@@ -167,44 +170,80 @@ def main() -> None:
                         st.caption(f"Similarity score: {chunk.similarity_score:.3f}")
                     st.text(chunk.content)
 
-    st.subheader("Ask your documents")
-    st.caption("Gemini answers using relevant passages sent from your indexed documents.")
-    with st.form("question_answering"):
-        question = st.text_input("Question", key="question")
-        answer_top_k = st.number_input(
-            "Passages to use", min_value=1, max_value=20, value=4, step=1,
-            key="answer_top_k",
-        )
-        asked = st.form_submit_button("Get answer", key="ask_submit")
-    if asked:
-        st.session_state.pop("question_answer", None)
-        st.session_state.pop("answered_question", None)
-        if not question.strip():
-            st.warning("Enter a question.")
+
+def display_message(message: dict) -> None:
+    with st.chat_message(message["role"]):
+        if message.get("kind") == "error":
+            st.error(message["content"])
+        elif message.get("kind") == "info":
+            st.info(message["content"])
+        elif message["role"] == "user":
+            st.text(message["content"])
         else:
-            try:
-                with st.spinner("Finding evidence and asking Gemini..."):
-                    answer = answer_question(question, get_store(), top_k=int(answer_top_k))
-            except GenerationError as error:
-                st.error(str(error))
-            except Exception:
-                st.error("Could not answer the question. Check the knowledge base and retry.")
-            else:
-                st.session_state["question_answer"] = answer
-                st.session_state["answered_question"] = question.strip()
-    if "question_answer" in st.session_state:
-        answer = st.session_state["question_answer"]
-        st.text(f"Question: {st.session_state['answered_question']}")
-        if not answer.has_answer:
-            st.info(answer.answer)
-        else:
-            st.markdown(answer.answer)
-            st.write("Sources")
-            for source in answer.sources:
+            st.markdown(message["content"])
+        if message.get("sources"):
+            st.caption("Sources")
+            for source in message["sources"]:
                 label = f"[{source.id}] {source.filename}"
                 if source.page is not None:
                     label += f" — PDF page {source.page}"
                 st.text(label)
+
+
+def chat_tab() -> None:
+    st.caption("Ask about your documents. History is shown only in this session; each question is answered independently.")
+    controls, actions = st.columns([3, 1])
+    with controls:
+        top_k = st.number_input(
+            "Passages to use", min_value=1, max_value=20, value=4, step=1,
+            key="answer_top_k",
+        )
+    with actions:
+        st.button("Clear Chat", key="clear_chat", on_click=clear_chat)
+    history = st.session_state.setdefault("chat_messages", [])
+    transcript = st.container()
+    with transcript:
+        if not history:
+            st.caption("Add documents in Knowledge Base, then ask a question here.")
+        for message in history:
+            display_message(message)
+    question = st.chat_input("Ask about your documents", key="question")
+    if question is not None:
+        if not question.strip():
+            st.warning("Enter a question.")
+        else:
+            message = {"role": "user", "content": question.strip()}
+            history.append(message)
+            with transcript:
+                display_message(message)
+                try:
+                    with st.spinner("Finding evidence and asking Gemini..."):
+                        answer = answer_question(question.strip(), get_store(), top_k=int(top_k))
+                except GenerationError as error:
+                    reply = {"role": "assistant", "content": str(error), "kind": "error"}
+                except Exception:
+                    reply = {"role": "assistant", "content": "Could not answer the question. Check the knowledge base and retry.", "kind": "error"}
+                else:
+                    reply = {
+                        "role": "assistant", "content": answer.answer,
+                        "sources": answer.sources,
+                        "kind": "answer" if answer.has_answer else "info",
+                    }
+                history.append(reply)
+                display_message(reply)
+    with st.expander("Semantic search (optional)", expanded=False):
+        semantic_search()
+
+
+def main() -> None:
+    st.set_page_config(page_title="AI Knowledge Base Assistant")
+    st.title("AI Knowledge Base Assistant")
+    ai_chat, knowledge_base = st.tabs(["AI Chat", "Knowledge Base"])
+    # Process mutations before rendering chat so removed evidence is never displayed.
+    with knowledge_base:
+        knowledge_base_tab()
+    with ai_chat:
+        chat_tab()
 
 
 if __name__ == "__main__":

@@ -84,7 +84,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(self.app.info), 2)
         self.assertEqual(self.stores[0]._collection.count(), 2)
         self.assertEqual(len(self.embeddings.document_calls), 2)
-        self.assertEqual(len(self.app.expander), 0)
+        self.assertEqual(len(self.app.expander), 1)
         self.factory.assert_called_once_with()
 
     def test_pdf_upload_displays_original_page(self):
@@ -138,7 +138,7 @@ class AppTests(unittest.TestCase):
             self.search()
         self.assertFalse(self.app.exception)
         self.assertIn("Model unavailable", self.app.error[0].value)
-        self.assertEqual(len(self.app.expander), 0)
+        self.assertEqual(len(self.app.expander), 1)
 
     def test_missing_scores_and_pages_are_not_displayed(self):
         result = RetrievedChunk("id", "Plain content", {"source": "notes.txt"}, None, None)
@@ -150,8 +150,7 @@ class AppTests(unittest.TestCase):
                              for item in self.app.caption))
 
     def ask(self, question="What do the documents say?"):
-        self.app.text_input(key="question").set_value(question)
-        self.app.button(key="ask_submit").click().run()
+        self.app.chat_input(key="question").set_value(question).run()
 
     def test_question_answer_and_sources_persist_on_rerun(self):
         answer = QuestionAnswer("Cats are mammals. [1]", [
@@ -168,7 +167,7 @@ class AppTests(unittest.TestCase):
             generate.assert_called_once()
             self.assertIn("Cats are mammals. [1]", [item.value for item in self.app.markdown])
         self.upload_txt()
-        self.assertNotIn("question_answer", self.app.session_state)
+        self.assertEqual(self.app.session_state["chat_messages"], [])
 
     def test_blank_question_does_not_open_store_or_generate(self):
         with patch("knowledge_base.generation.answer_question") as generate:
@@ -183,8 +182,8 @@ class AppTests(unittest.TestCase):
                 with patch("knowledge_base.generation.answer_question", side_effect=error):
                     self.ask()
                 self.assertFalse(self.app.exception)
-                self.assertIn(str(error), self.app.error[0].value)
-                self.assertNotIn("question_answer", self.app.session_state)
+                self.assertIn(str(error), self.app.error[-1].value)
+                self.assertEqual(self.app.session_state["chat_messages"][-1]["kind"], "error")
 
     def test_insufficient_context_displays_information(self):
         with patch("knowledge_base.generation.answer_question", return_value=
@@ -193,14 +192,15 @@ class AppTests(unittest.TestCase):
         self.assertFalse(self.app.exception)
         self.assertIn(INSUFFICIENT_CONTEXT, [item.value for item in self.app.info])
 
-    def test_failed_question_clears_old_answer_and_hides_internal_error(self):
+    def test_failed_question_preserves_history_and_hides_internal_error(self):
         with patch("knowledge_base.generation.answer_question", return_value=
                    QuestionAnswer("Previous answer", [], True)):
             self.ask()
         with patch("knowledge_base.generation.answer_question", side_effect=RuntimeError("secret-key")):
             self.ask("Another question")
         self.assertFalse(self.app.exception)
-        self.assertNotIn("question_answer", self.app.session_state)
+        self.assertEqual(len(self.app.session_state["chat_messages"]), 4)
+        self.assertIn("Previous answer", [item.value for item in self.app.markdown])
         self.assertNotIn("secret-key", self.app.error[0].value)
 
     def test_management_list_refreshes_after_upload(self):
@@ -224,8 +224,9 @@ class AppTests(unittest.TestCase):
     def test_delete_requires_confirmation_and_removes_retrieval_results(self):
         self.upload_txt()
         self.search()
-        self.app.session_state["question_answer"] = QuestionAnswer("Old answer", [], True)
-        self.app.session_state["answered_question"] = "Old question"
+        self.app.session_state["chat_messages"] = [
+            {"role": "assistant", "content": "Old answer", "kind": "answer"},
+        ]
         self.app.button(key="request_delete").click().run()
         self.assertEqual(self.stores[0]._collection.count(), 2)
         self.assertIn("cats.txt", self.app.warning[0].value)
@@ -236,7 +237,7 @@ class AppTests(unittest.TestCase):
         ])
         self.assertTrue(any("Deleted cats.txt" in item.value for item in self.app.success))
         self.assertNotIn("search_results", self.app.session_state)
-        self.assertNotIn("question_answer", self.app.session_state)
+        self.assertEqual(self.app.session_state["chat_messages"], [])
         self.search(top_k=20)
         self.assertNotIn("Source: cats.txt", [item.value for item in self.app.text])
         self.assertIn("Source: fish.txt", [item.value for item in self.app.text])
@@ -315,7 +316,62 @@ class AppTests(unittest.TestCase):
         self.assertFalse(self.app.exception)
         self.assertTrue(any("Could not list indexed documents" in item.value for item in self.app.error))
         self.assertEqual(self.app.text_input(key="query").label, "Search query")
-        self.assertEqual(self.app.text_input(key="question").label, "Question")
+        self.assertEqual(len(self.app.chat_input), 1)
+
+    def test_tabs_and_optional_retrieval_layout(self):
+        self.assertEqual([tab.label for tab in self.app.tabs], ["AI Chat", "Knowledge Base"])
+        self.assertEqual(len(self.app.tabs[0].chat_input), 1)
+        self.assertEqual(len(self.app.tabs[0].file_uploader), 0)
+        self.assertEqual(len(self.app.tabs[1].file_uploader), 1)
+        self.assertEqual(self.app.expander[0].label, "Semantic search (optional)")
+        self.assertFalse(self.app.expander[0].proto.expanded)
+
+    def test_chat_history_has_roles_sources_and_independent_questions(self):
+        first = QuestionAnswer("First answer [1]", [SourceReference(1, "a", "first.pdf", 2)], True)
+        second = QuestionAnswer("Second answer [1]", [SourceReference(1, "b", "second.txt", None)], True)
+        with patch("knowledge_base.generation.answer_question", side_effect=[first, second]) as generate:
+            self.ask("First question")
+            self.ask("Second question")
+            self.assertEqual([message.name for message in self.app.chat_message],
+                             ["user", "assistant", "user", "assistant"])
+            self.assertEqual(generate.call_count, 2)
+            self.assertEqual(generate.call_args_list[0].args, ("First question", self.stores[0]))
+            self.assertEqual(generate.call_args_list[1].args, ("Second question", self.stores[0]))
+            self.assertEqual(generate.call_args_list[1].kwargs, {"top_k": 4})
+            self.assertIn("[1] first.pdf — PDF page 2", [item.value for item in self.app.chat_message[1].text])
+            self.assertIn("[1] second.txt", [item.value for item in self.app.chat_message[3].text])
+            self.app.run()
+            self.assertEqual(generate.call_count, 2)
+            self.assertEqual(len(self.app.chat_message), 4)
+
+    def test_clear_chat_preserves_documents_and_does_not_call_model(self):
+        self.upload_txt()
+        with patch("knowledge_base.generation.answer_question", return_value=
+                   QuestionAnswer("Answer", [], True)) as generate:
+            self.ask()
+            self.app.button(key="clear_chat").click().run()
+            self.assertFalse(self.app.exception)
+            self.assertEqual(self.app.session_state["chat_messages"], [])
+            self.assertEqual(len(self.app.chat_message), 0)
+            generate.assert_called_once()
+        self.assertEqual(self.stores[0]._collection.count(), 2)
+
+    def test_new_session_has_no_chat_history(self):
+        with patch("knowledge_base.generation.answer_question", return_value=
+                   QuestionAnswer("Answer", [], True)):
+            self.ask()
+        another = AppTest.from_file(str(APP), default_timeout=30).run()
+        self.assertFalse(another.exception)
+        self.assertEqual(another.session_state["chat_messages"], [])
+        self.assertEqual(len(another.chat_message), 0)
+
+    def test_error_history_survives_rerun_without_retrying_model(self):
+        with patch("knowledge_base.generation.answer_question", side_effect=GenerationError("Gemini timed out")) as generate:
+            self.ask()
+            self.app.run()
+            generate.assert_called_once()
+        self.assertEqual([message.name for message in self.app.chat_message], ["user", "assistant"])
+        self.assertIn("Gemini timed out", self.app.chat_message[1].error[0].value)
 
 
 class UploadTests(unittest.TestCase):
