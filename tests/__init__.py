@@ -1,1 +1,1 @@
-"""Placeholder for future tests."""
+"""Automated backend and Streamlit regression tests."""

@@ -1,7 +1,8 @@
 """Session-only document chat and Knowledge Base management interface."""
 
-import streamlit as st
 from pathlib import PurePosixPath
+
+import streamlit as st
 
 from knowledge_base.generation import GenerationError, answer_question
 from knowledge_base.retrieval import retrieve
@@ -16,7 +17,7 @@ def get_store() -> ChromaStore:
 
 
 def clear_results() -> None:
-    for key in ("search_results", "searched_query", "question_answer", "answered_question"):
+    for key in ("search_results", "searched_query"):
         st.session_state.pop(key, None)
     st.session_state["chat_messages"] = []
 
@@ -98,16 +99,17 @@ def knowledge_base_tab() -> None:
         try:
             with st.spinner("Opening the knowledge base..."):
                 store = get_store()
-                existing = {document.filename for document in store.list_documents()}
         except Exception as error:
             st.error(f"Could not open the knowledge base: {error}")
         else:
             for upload in uploads:
                 filename = PurePosixPath(upload.name.replace("\\", "/")).name
-                if filename in existing:
-                    st.info(f"{filename}: already indexed. Use Replace document to update its content.")
-                    continue
                 try:
+                    # A prior upload may have saved chunks before reporting a failure.
+                    existing = {document.filename for document in store.list_documents()}
+                    if filename in existing:
+                        st.info(f"{filename}: already indexed. Use Replace document to update its content.")
+                        continue
                     with st.spinner(f"Indexing {upload.name}..."):
                         ids = index_upload(upload.name, upload.getvalue(), store)
                 except Exception as error:
@@ -118,7 +120,6 @@ def knowledge_base_tab() -> None:
                     )
                 else:
                     if ids:
-                        existing.add(filename)
                         st.success(f"{upload.name}: indexed {len(ids)} new chunks.")
                     else:
                         st.info(

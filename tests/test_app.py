@@ -221,6 +221,27 @@ class AppTests(unittest.TestCase):
         records = self.stores[0]._collection.get(where={"source": "cats.txt"})
         self.assertEqual(records["documents"], ["Cats are mammals"])
 
+    def test_partial_upload_failure_does_not_merge_later_same_name(self):
+        self.app.file_uploader(key="uploads").set_value([
+            ("cats.txt", b"Cats are mammals", "text/plain"),
+            ("cats.txt", b"Kittens drink milk", "text/plain"),
+            ("fish.txt", b"Fish live underwater", "text/plain"),
+        ]).run()
+
+        def fail_after_write(filename, content, store):
+            ids = index_upload(filename, content, store)
+            if content == b"Cats are mammals":
+                raise RuntimeError("Indexing acknowledgement failed after saving a chunk")
+            return ids
+
+        with patch("knowledge_base.uploads.index_upload", side_effect=fail_after_write):
+            self.app.button(key="index").click().run()
+        self.assertFalse(self.app.exception)
+        records = self.stores[0]._collection.get(where={"source": "cats.txt"})
+        self.assertEqual(records["documents"], ["Cats are mammals"])
+        self.assertEqual(self.stores[0]._collection.count(), 2)
+        self.assertTrue(any("Use Replace document" in item.value for item in self.app.info))
+
     def test_delete_requires_confirmation_and_removes_retrieval_results(self):
         self.upload_txt()
         self.search()

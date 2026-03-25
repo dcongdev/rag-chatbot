@@ -26,3 +26,18 @@ Thumbs.db
 # Local documents and vector storage (ignore custom paths separately)
 /data/
 /uploads/
+
+# Additional local vector-store locations and runtime output
+.chroma/
+/chroma/
+/chroma_db/
+chroma.sqlite3*
+.cache/
+.mypy_cache/
+.coverage.*
+coverage.xml
+*.log
+*.tmp
+/tmp/
+/temp/
+
