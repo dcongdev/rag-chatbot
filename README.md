@@ -1,86 +1,82 @@
 # AI Knowledge Base Assistant
 
-A lightweight modular AI Knowledge Base Assistant with PDF/TXT ingestion and
-text chunking. Retrieval, generation, and UI remain placeholders.
+A lightweight Retrieval-Augmented Generation (RAG) application that enables users to ask questions about their own documents using natural language. The system combines semantic search with Google's Gemini API to generate context-aware answers grounded in uploaded knowledge sources.
 
-## Setup
+## Features
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then run
-from the repository root:
+- **Document Management:** Upload, view, replace, and delete PDF/TXT documents.
+- **Document Processing:** Extract text, split documents into overlapping chunks, and generate embeddings.
+- **Semantic Search:** Retrieve relevant document chunks using Sentence Transformers and ChromaDB.
+- **AI Question Answering:** Generate answers based on retrieved context using Gemini API.
+- **Source References:** Display supporting document sources alongside AI-generated answers.
+- **Interactive Interface:** Streamlit-based chat interface with session history and document management.
 
-```powershell
-uv python install 3.11
-uv sync --locked
-Copy-Item .env.example .env
+## Tech Stack
+
+- **Language:** Python
+- **Framework:** LangChain
+- **LLM:** Google Gemini API
+- **Embeddings:** Sentence Transformers
+- **Vector Database:** ChromaDB
+- **Interface:** Streamlit
+- **Environment:** uv
+
+## How It Works
+
+1. Users upload PDF or TXT documents to the knowledge base.
+2. Documents are parsed, split into chunks, and converted into vector embeddings.
+3. Embeddings and document metadata are stored in ChromaDB.
+4. User questions are embedded and matched against relevant document chunks.
+5. Retrieved context is sent to Gemini to generate an answer with source references.
+
+## Getting Started
+
+### Prerequisites
+
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/)
+- A Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey)
+
+### Installation
+
+Clone the repository:
+
+```bash
+git clone https://github.com/dcongdev/rag-chatbot.git
+cd rag-chatbot
 ```
 
-Python 3.11 is pinned for development; the project supports Python 3.11+.
-`uv sync` creates `.venv` and installs the project and its locked dependencies.
-Replace the placeholder `GEMINI_API_KEY` in `.env` when needed. Environment-file
-loading and Gemini integration are not implemented yet.
+Install dependencies:
 
-## Run
+```bash
+uv sync
+```
 
-```powershell
+Create a `.env` file in the project root:
+
+```env
+GEMINI_API_KEY=your_api_key_here
+```
+
+### Run the Application
+
+```bash
 uv run streamlit run app.py
 ```
 
-The entry point is a placeholder, so Streamlit currently displays an empty page.
+Open `http://localhost:8501` in your browser.
 
-## Structure
+## Testing
 
-```text
-app.py                     # Placeholder Streamlit entry point
-src/knowledge_base/
-    __init__.py
-    ingestion.py           # PDF/TXT parsing and text chunking
-    retrieval.py           # Placeholder
-    generation.py          # Placeholder
-tests/                     # Automated ingestion tests
-```
+Run the automated test suite:
 
-## Verify the environment
-
-```powershell
-uv run python --version
-uv run python -c "import streamlit; import knowledge_base; print('Environment ready')"
-```
-
-## Document ingestion
-
-```python
-from knowledge_base.ingestion import IngestionError, ingest_document
-
-try:
-    chunks = ingest_document("notes.pdf", chunk_size=1000, chunk_overlap=200)
-except IngestionError as error:
-    print(error)
-else:
-    for chunk in chunks:
-        print(chunk.metadata, chunk.page_content)
-```
-
-`load_document(path)` and `split_documents(documents, ...)` can also be used
-independently. They return LangChain `Document` objects for future retrieval use.
-PDF extraction uses [pypdf](https://pypdf.readthedocs.io/en/stable/);
-chunking uses LangChain's
-[RecursiveCharacterTextSplitter](https://reference.langchain.com/python/langchain-text-splitters/character/RecursiveCharacterTextSplitter).
-
-- Supported extensions are `.pdf` and `.txt` (case insensitive). TXT files must
-  use UTF-8; an optional UTF-8 BOM is removed.
-- Metadata includes `source` (filename), and PDF `page` (one-based original page
-  number). Each PDF page is split independently; chunks never span pages.
-- Chunk sizes count characters, with overlap determined by natural separator
-  boundaries, up to the configured target. Size must be positive and overlap
-  must be nonnegative and smaller than size.
-- Empty files, blank pages, and PDFs without extractable text yield no chunks.
-  Scanned PDFs require OCR, which is not implemented.
-- Unsupported formats raise `UnsupportedFormatError`, a subclass of
-  `IngestionError`. Read, decode, password, and parsing failures raise
-  `IngestionError`; a failed PDF is rejected as a whole.
-
-Run the focused tests (no network or API key required):
-
-```powershell
+```bash
 uv run python -m unittest discover -s tests -v
 ```
+
+## Notes
+
+- Document embeddings are stored locally using persistent ChromaDB storage.
+- Gemini API requires an internet connection and a valid API key.
+- Chat history is maintained within the current Streamlit session.
+- Local data, API credentials, and runtime files are excluded from version control.
